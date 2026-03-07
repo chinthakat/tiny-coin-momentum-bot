@@ -1,0 +1,93 @@
+# ─── TinyCoins Momentum Trading System Configuration ───
+
+# ─── Trade Mode ───
+# "minimum_quantity" = use exchange minQty for every trade (low-risk testing)
+# "normal"           = use risk-based position sizing
+trade_mode: "minimum_quantity"
+
+# When true, log decisions but do NOT place real orders
+dry_run: true
+
+# ─── Universe Filters ───
+universe:
+  refresh_interval_seconds: 300          # 5 minutes
+  min_24h_quote_volume_usdt: 50000       # Minimum 24h USDT volume
+  max_spread_pct: 2.0                    # Max bid-ask spread %
+  min_trade_count_24h: 500               # Minimum number of trades in 24h
+  excluded_quote_assets: ["TUSD", "BUSD", "FDUSD", "EUR", "GBP", "TRY", "BRL", "ARS"]
+  excluded_base_patterns: ["UP", "DOWN", "BULL", "BEAR"]  # Leveraged tokens
+
+# ─── Radar Layer ───
+radar:
+  tick_interval_seconds: 1               # Radar evaluation cadence
+  promotion_top_n: 10                    # Max symbols promoted to high-res
+  cooldown_seconds: 300                  # 5 min cooldown after invalidation
+  # Feature weights for composite radar score (must sum to ~1.0)
+  weights:
+    return_acceleration: 0.25
+    volume_burst: 0.30
+    spread_compression: 0.15
+    quote_activity: 0.15
+    early_buildup: 0.15
+  # Thresholds
+  promotion_score_threshold: 0.65
+  buildup_price_range_max_pct: 1.0       # Flat range for buildup detection
+  buildup_volume_increase_min: 1.5       # Volume ratio vs baseline
+
+# ─── High-Resolution Monitoring ───
+monitor:
+  max_promoted_symbols: 15
+  book_depth_levels: 20
+  book_update_speed_ms: 100
+  rolling_window_seconds: 60
+  flow_window_seconds: 5
+
+# ─── Long Engine ───
+long_engine:
+  # Hard filters
+  max_spread_pct: 1.5
+  min_top_book_notional_usdt: 100
+  min_warmup_seconds: 30
+  max_extension_pct: 5.0                 # Don't enter if already up >5%
+  # Scoring
+  score_threshold: 0.70
+  persistence_ticks: 3                   # Must exceed threshold N consecutive times
+  # Watch
+  max_watch_duration_seconds: 60
+  confirmation_count_required: 2
+  # Entry validation
+  max_slippage_pct: 0.5
+  max_price_beyond_trigger_pct: 0.3
+
+# ─── Execution ───
+execution:
+  order_type: "LIMIT"                    # LIMIT or MARKET
+  fill_timeout_seconds: 5               # Cancel if unfilled
+  max_book_consumption_pct: 10           # Don't eat >10% of visible depth
+
+# ─── Exit Logic ───
+exit:
+  hard_stop_pct: 2.0                     # 2% stop loss
+  time_stop_seconds: 300                 # 5 minute max hold
+  trailing_stop_activation_pct: 1.0      # Activate after 1% gain
+  trailing_stop_distance_pct: 0.5        # Trail 0.5% behind
+  flow_invalidation_exit: true           # Exit immediately on thesis break
+
+# ─── Risk Management ───
+risk:
+  max_risk_per_trade_pct: 1.0            # 1% of capital per trade
+  max_concurrent_positions: 3
+  max_total_exposure_pct: 10.0           # Max 10% of capital deployed
+  max_daily_drawdown_pct: 3.0            # Kill switch at 3% daily loss
+  max_consecutive_losses: 5              # Kill switch after 5 consecutive losses
+  stale_data_timeout_seconds: 30         # Kill switch if no data for 30s
+  max_order_rejects: 5                   # Kill switch after 5 rejects in a row
+  symbol_blacklist: []                   # Manually blocked symbols
+
+# ─── Logging ───
+logging:
+  log_dir: "logs"
+  level: "INFO"
+  rotation_mb: 50
+  retention_days: 30
+  structured_json: true
