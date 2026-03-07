@@ -29,8 +29,9 @@ class LongWatchState:
     price_at_start: float = 0.0
     high_since: float = 0.0
     low_since: float = float("inf")
-    confirmation_count: int = 0
-    consecutive_above_threshold: int = 0
+    confirmation_types: Set[str] = field(default_factory=set)
+    confirmation_ticks: int = 0  # number of separate ticks with confirmations
+    last_confirm_tick: int = 0   # tick id when last confirmation was counted
     last_score: float = 0.0
     reason: str = ""
 
@@ -66,6 +67,7 @@ class LongEngine:
         self._lifecycle = lifecycle
         self._watches: Dict[str, LongWatchState] = {}
         self._persistence: Dict[str, int] = {}  # symbol → consecutive above threshold
+        self._eval_tick: int = 0  # global tick counter
 
     # ─── Hard Filters ───
 
@@ -123,12 +125,50 @@ class LongEngine:
 
         return min(max(score, 0), 1.0)
 
+    # ─── Watch Invalidation (Fix #11) ───
+
+    def _check_watch_invalidation(
+        self, symbol: str, features: DeepFeatures, watch: LongWatchState
+    ) -> Optional[str]:
+        """
+        Check if watch should be invalidated based on microstructure breakdown.
+
+        Returns reason string if invalidated, None otherwise.
+        """
+        state = self._state.get(symbol)
+        if state is None:
+            return "state_lost"
+
+        # Flow flip: sell aggressor dominant
+        if features.flow_imbalance < -0.3:
+            return "flow_flip_negative"
+
+        # Spread blowout: spread more than 2x the configured max
+        if state.spread_pct > self._lcfg.max_spread_pct * 2.0:
+            return "spread_blowout"
+
+        # Depth collapse: top-5 book notional dropped below threshold
+        top_notional = state.book_bid_notional(5) + state.book_ask_notional(5)
+        if top_notional < self._lcfg.min_top_book_notional_usdt * 0.5:
+            return "depth_collapse"
+
+        # Sharp negative micro return during watch
+        if features.micro_return < -1.5:
+            return "sharp_negative_micro_return"
+
+        # Ask refill: asks came back strongly (vacuum was fake)
+        if features.ask_depletion < -0.3:
+            return "ask_refill"
+
+        return None
+
     # ─── Evaluation Loop ───
 
     def evaluate(self, promoted_symbols: Set[str]) -> List[str]:
         """
         Evaluate all promoted symbols. Returns list of symbols ready for entry.
         """
+        self._eval_tick += 1
         entry_signals: List[str] = []
 
         for symbol in promoted_symbols:
@@ -165,20 +205,29 @@ class LongEngine:
                 watch = self._watches[symbol]
                 watch.last_score = score
 
-                # Update high/low tracking
-                state = self._state.get(symbol)
-                if state and state.mid_price > 0:
-                    watch.high_since = max(watch.high_since, state.mid_price)
-                    watch.low_since = min(watch.low_since, state.mid_price)
+                # FIX #11: Check microstructure invalidation conditions
+                invalidation = self._check_watch_invalidation(symbol, features, watch)
+                if invalidation:
+                    self._invalidate_watch(symbol, invalidation)
+                    continue
 
                 # Check watch timeout
                 if watch.duration > self._lcfg.max_watch_duration_seconds:
                     self._invalidate_watch(symbol, "watch_timeout")
                     continue
 
-                # Confirmation logic
-                if self._check_confirmation(symbol, features, watch):
-                    entry_signals.append(symbol)
+                # FIX #10: Store prior high BEFORE updating
+                state = self._state.get(symbol)
+                if state and state.mid_price > 0:
+                    prior_high = watch.high_since
+                    watch.high_since = max(watch.high_since, state.mid_price)
+                    watch.low_since = min(watch.low_since, state.mid_price)
+
+                    # FIX #9: Confirmation with per-tick tracking
+                    if self._check_confirmation(
+                        symbol, features, watch, prior_high
+                    ):
+                        entry_signals.append(symbol)
 
         return entry_signals
 
@@ -205,36 +254,51 @@ class LongEngine:
         )
 
     def _check_confirmation(
-        self, symbol: str, features: DeepFeatures, watch: LongWatchState
+        self,
+        symbol: str,
+        features: DeepFeatures,
+        watch: LongWatchState,
+        prior_high: float,
     ) -> bool:
-        """Check if confirmation conditions are met for entry."""
+        """
+        Check if confirmation conditions are met for entry.
+
+        FIX #9: Confirmations from one tick only count as one confirmation tick.
+        FIX #10: Breakout checks against prior_high (before update).
+        """
         state = self._state.get(symbol)
         if state is None:
             return False
 
-        confirmed = False
+        # Collect which confirmation types fired THIS tick
+        this_tick_confirmations: Set[str] = set()
 
-        # Condition 1: Price breaks recent local high
-        if state.mid_price > watch.high_since * 1.001:  # 0.1% above high
-            watch.confirmation_count += 1
-            confirmed = True
+        # Condition 1: Price breaks recent local high (uses prior_high)
+        if prior_high > 0 and state.mid_price > prior_high * 1.001:
+            this_tick_confirmations.add("price_breakout")
 
         # Condition 2: Sustained buy flow
         buy, sell = state.buy_sell_flow(5)
         if buy > 0 and sell > 0 and (buy / (buy + sell)) > 0.65:
-            watch.confirmation_count += 1
-            confirmed = True
+            this_tick_confirmations.add("sustained_buy_flow")
 
-        # Condition 3: Ask depletion persists
+        # Condition 3: Ask depletion persists with stable spread
         if features.ask_depletion > 0.3 and features.spread_stability < 0.5:
-            watch.confirmation_count += 1
+            this_tick_confirmations.add("ask_depletion_persistent")
 
-        # Need enough confirmations
-        if watch.confirmation_count >= self._lcfg.confirmation_count_required:
+        # Only count as a new confirmation tick if we have new types
+        if this_tick_confirmations and self._eval_tick != watch.last_confirm_tick:
+            watch.confirmation_types.update(this_tick_confirmations)
+            watch.confirmation_ticks += 1
+            watch.last_confirm_tick = self._eval_tick
+
+        # Need enough confirmation ticks (not just enough types in one tick)
+        if watch.confirmation_ticks >= self._lcfg.confirmation_count_required:
             logger.info(
                 "long_confirmed",
                 symbol=symbol,
-                confirmations=watch.confirmation_count,
+                confirmation_ticks=watch.confirmation_ticks,
+                confirmation_types=list(watch.confirmation_types),
                 score=round(watch.last_score, 3),
             )
             return True

@@ -69,6 +69,9 @@ class ExecutionConfig:
     order_type: str = "LIMIT"
     fill_timeout_seconds: int = 5
     max_book_consumption_pct: float = 10.0
+    risk_per_trade_usd: float = 5.0       # FIX #12: risk budget per trade
+    max_notional_per_trade: float = 50.0   # FIX #12: max notional cap
+    max_slippage_pct: float = 0.3          # FIX #13: max entry buffer
 
 
 @dataclass
@@ -89,6 +92,8 @@ class RiskConfig:
     max_consecutive_losses: int = 5
     stale_data_timeout_seconds: int = 30
     max_order_rejects: int = 5
+    max_total_notional: float = 200.0      # FIX #15: portfolio notional cap
+    max_symbol_notional: float = 50.0      # FIX #15: per-symbol notional cap
     symbol_blacklist: List[str] = field(default_factory=list)
 
 

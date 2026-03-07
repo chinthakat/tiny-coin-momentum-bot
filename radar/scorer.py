@@ -6,9 +6,11 @@ and promotes top candidates to high-resolution monitoring.
 """
 
 import time
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Deque, Dict, List, Optional, Set, Tuple
 
+import numpy as np
 import structlog
 
 from core.config import RadarConfig
@@ -43,15 +45,42 @@ class CooldownEntry:
         return (time.time() - self.started_at) < self.duration
 
 
+@dataclass
+class FeatureStats:
+    """Rolling statistics for z-score normalization of a single feature."""
+
+    values: Deque = field(default_factory=lambda: deque(maxlen=120))
+
+    def push(self, v: float) -> None:
+        self.values.append(v)
+
+    @property
+    def mean(self) -> float:
+        if len(self.values) < 5:
+            return 0.0
+        return float(np.mean(self.values))
+
+    @property
+    def std(self) -> float:
+        if len(self.values) < 5:
+            return 1.0  # avoid div zero
+        s = float(np.std(self.values))
+        return max(s, 1e-6)
+
+    def z_score(self, v: float) -> float:
+        """Compute z-score, clipped to [0, 1]."""
+        if len(self.values) < 5:
+            return 0.0
+        z = (v - self.mean) / self.std
+        return min(max(z / 3.0, 0), 1.0)  # normalize ~3σ → [0, 1]
+
+
 class RadarScorer:
     """
     Computes composite radar scores and manages symbol promotion.
 
-    Promotion rules:
-    - Only top-N symbols are promoted
-    - Must exceed score threshold
-    - Must not be in cooldown
-    - Must have basic tradability
+    FIX #4: Uses per-symbol z-score normalization instead of fixed caps.
+    FIX #5: Reserves promotion slots by label class for better coverage.
     """
 
     def __init__(self, config: RadarConfig, feature_engine: RadarFeatureEngine):
@@ -61,6 +90,9 @@ class RadarScorer:
         self._promoted: Set[str] = set()
         self._last_results: Dict[str, RadarResult] = {}
 
+        # FIX #4: Per-symbol rolling stats for z-score normalization
+        self._feature_stats: Dict[str, Dict[str, FeatureStats]] = {}
+
     @property
     def promoted_symbols(self) -> Set[str]:
         return self._promoted.copy()
@@ -69,24 +101,42 @@ class RadarScorer:
     def last_results(self) -> Dict[str, RadarResult]:
         return self._last_results
 
+    def _get_stats(self, symbol: str) -> Dict[str, FeatureStats]:
+        """Get or create per-symbol feature statistics."""
+        if symbol not in self._feature_stats:
+            self._feature_stats[symbol] = {
+                "ret_accel": FeatureStats(),
+                "vol_burst": FeatureStats(),
+                "spread_comp": FeatureStats(),
+                "activity": FeatureStats(),
+                "buildup": FeatureStats(),
+            }
+        return self._feature_stats[symbol]
+
     def _compute_composite_score(self, features: RadarFeatureValues) -> float:
-        """Weighted combination of radar features → 0..1 score."""
+        """
+        FIX #4: Weighted combination using z-score normalization.
+
+        Each feature is scored relative to its own recent history,
+        making scores comparable across symbols with different regimes.
+        """
         w = self._config.weights
+        stats = self._get_stats(features.symbol)
 
-        # Normalize each feature to approximately 0..1 range
-        # Return acceleration: cap at ±5%
-        ret_score = min(max(features.return_acceleration / 5.0, 0), 1.0)
+        # Push raw values into history
+        stats["ret_accel"].push(features.return_acceleration)
+        stats["vol_burst"].push(features.volume_burst_ratio)
+        stats["spread_comp"].push(-features.spread_compression)  # negate: compression is good
+        stats["activity"].push(features.quote_activity_ratio)
+        stats["buildup"].push(features.early_buildup_score)
 
-        # Volume burst: already a ratio, cap at 5x
-        vol_score = min(features.volume_burst_ratio / 5.0, 1.0)
+        # Z-score normalize each feature
+        ret_score = stats["ret_accel"].z_score(features.return_acceleration)
+        vol_score = stats["vol_burst"].z_score(features.volume_burst_ratio)
+        spread_score = stats["spread_comp"].z_score(-features.spread_compression)
+        activity_score = stats["activity"].z_score(features.quote_activity_ratio)
 
-        # Spread compression: negative is good, normalize
-        spread_score = min(max(-features.spread_compression / 20.0, 0), 1.0)
-
-        # Activity ratio: cap at 3x
-        activity_score = min(features.quote_activity_ratio / 3.0, 1.0)
-
-        # Buildup: already 0..1
+        # Buildup is already 0..1 and composite, keep it raw
         buildup_score = features.early_buildup_score
 
         composite = (
@@ -162,9 +212,10 @@ class RadarScorer:
         long_eligible: Set[str],
     ) -> Tuple[Set[str], Set[str]]:
         """
-        Select symbols to promote and demote.
+        FIX #5: Select symbols with quota-based promotion by label class.
 
-        Returns (to_promote, to_demote).
+        Reserves slots for different label types to improve coverage
+        and reduce homogeneity.
         """
         # Clean up expired cooldowns
         self._cooldowns = {
@@ -174,28 +225,42 @@ class RadarScorer:
         # Filter candidates
         candidates: List[RadarResult] = []
         for r in results:
-            # Must exceed threshold
             if r.composite_score < self._config.promotion_score_threshold:
                 continue
-            # Must be long-eligible (tradeable)
             if r.symbol not in long_eligible:
                 continue
-            # Must not be in cooldown
             if r.symbol in self._cooldowns:
                 continue
-            # Must not be already extended (don't chase)
             if r.label == RadarLabel.ALREADY_EXTENDED:
                 continue
-            # Must not be illiquid trap
             if r.label == RadarLabel.ILLIQUID_TRAP:
                 continue
-
             candidates.append(r)
 
-        # Take top N
+        # FIX #5: Quota-based selection by label
+        max_n = self._config.promotion_top_n
         new_promoted: Set[str] = set()
-        for r in candidates[: self._config.promotion_top_n]:
-            new_promoted.add(r.symbol)
+
+        # Define quotas per label class
+        quotas = {
+            RadarLabel.IGNITION_RISK: min(3, max_n // 3),
+            RadarLabel.BUILDING_PRESSURE: min(5, max_n // 2),
+        }
+        # Remaining slots for any label
+        reserved_total = sum(quotas.values())
+        general_slots = max(max_n - reserved_total, 2)
+
+        # Fill reserved slots first
+        for label, quota in quotas.items():
+            label_candidates = [c for c in candidates if c.label == label]
+            for r in label_candidates[:quota]:
+                if len(new_promoted) < max_n:
+                    new_promoted.add(r.symbol)
+
+        # Fill remaining with top overall (regardless of label)
+        for r in candidates:
+            if r.symbol not in new_promoted and len(new_promoted) < max_n:
+                new_promoted.add(r.symbol)
 
         # Determine additions and removals
         to_promote = new_promoted - self._promoted
@@ -208,7 +273,11 @@ class RadarScorer:
             logger.info(
                 "radar_promoted",
                 symbols=list(to_promote),
-                scores={s: round(self._last_results[s].composite_score, 3) for s in to_promote if s in self._last_results},
+                scores={
+                    s: round(self._last_results[s].composite_score, 3)
+                    for s in to_promote
+                    if s in self._last_results
+                },
             )
         if to_demote:
             logger.info("radar_demoted", symbols=list(to_demote))
@@ -230,3 +299,9 @@ class RadarScorer:
             reason=reason,
             duration_s=self._config.cooldown_seconds,
         )
+
+    def cleanup_stats(self, active_symbols: set) -> None:
+        """Remove statistics for symbols no longer in the universe."""
+        stale = [s for s in self._feature_stats if s not in active_symbols]
+        for s in stale:
+            del self._feature_stats[s]

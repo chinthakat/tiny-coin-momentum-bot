@@ -34,6 +34,7 @@ class RadarFeatureValues:
     spread_compression: float = 0.0     # negative = compressed
     quote_activity_ratio: float = 0.0   # update freq vs baseline
     early_buildup_score: float = 0.0    # flat price + rising vol
+    price_range_60s_pct: float = 0.0    # true (high-low)/mid range
     computed_at: float = 0.0
 
 
@@ -44,8 +45,8 @@ class SymbolRadarState:
     symbol: str
     # Price history: (timestamp, price)
     prices: Deque = field(default_factory=lambda: deque(maxlen=120))
-    # Volume history: (timestamp, quote_volume)
-    volumes: Deque = field(default_factory=lambda: deque(maxlen=120))
+    # Volume delta history: (timestamp, delta_volume)
+    volume_deltas: Deque = field(default_factory=lambda: deque(maxlen=120))
     # Update count history: (timestamp,)
     updates: Deque = field(default_factory=lambda: deque(maxlen=120))
     # Spread history: (timestamp, spread_pct)
@@ -53,6 +54,7 @@ class SymbolRadarState:
     # Last known values
     last_price: float = 0.0
     last_volume: float = 0.0
+    prev_cumulative_volume: float = 0.0  # FIX #1: previous cumulative volume
     last_update_time: float = 0.0
     warmup_start: float = 0.0
 
@@ -66,17 +68,32 @@ class SymbolRadarState:
     def record_update(
         self, price: float, quote_volume: float, spread_pct: float = 0.0
     ) -> None:
-        """Record a new data point."""
+        """
+        Record a new data point.
+
+        FIX #1: quote_volume from mini-ticker is 24h rolling cumulative.
+        We compute the delta between consecutive updates and store that.
+        Handles backwards jumps (day rollover / reset) gracefully.
+        """
         now = time.time()
         if self.warmup_start == 0:
             self.warmup_start = now
 
         self.prices.append((now, price))
-        self.volumes.append((now, quote_volume))
         self.updates.append(now)
         if spread_pct > 0:
             self.spreads.append((now, spread_pct))
 
+        # FIX #1: Convert cumulative volume to delta
+        if self.prev_cumulative_volume > 0 and quote_volume >= self.prev_cumulative_volume:
+            delta = quote_volume - self.prev_cumulative_volume
+            self.volume_deltas.append((now, delta))
+        elif self.prev_cumulative_volume > 0 and quote_volume < self.prev_cumulative_volume:
+            # Backwards jump: day rollover or reset — treat as small positive
+            self.volume_deltas.append((now, quote_volume * 0.001))
+        # else: first update, no delta yet
+
+        self.prev_cumulative_volume = quote_volume
         self.last_price = price
         self.last_volume = quote_volume
         self.last_update_time = now
@@ -114,7 +131,7 @@ class RadarFeatureEngine:
         now = time.time()
         features = RadarFeatureValues(symbol=symbol, computed_at=now)
 
-        # ─── 1. Short-horizon returns ───
+        # ─── 1. Short-horizon returns (FIX #2) ───
         features.return_10s = self._compute_return(state, now, 10)
         features.return_30s = self._compute_return(state, now, 30)
         features.return_60s = self._compute_return(state, now, 60)
@@ -122,7 +139,7 @@ class RadarFeatureEngine:
         # Return acceleration = change in velocity (30s return - 60s return normalized)
         features.return_acceleration = features.return_30s - (features.return_60s * 0.5)
 
-        # ─── 2. Volume burst ratio ───
+        # ─── 2. Volume burst ratio (FIX #1) ───
         features.volume_burst_ratio = self._compute_volume_burst(state, now)
 
         # ─── 3. Spread compression ───
@@ -131,7 +148,10 @@ class RadarFeatureEngine:
         # ─── 4. Quote activity ratio ───
         features.quote_activity_ratio = self._compute_activity_ratio(state, now)
 
-        # ─── 5. Early buildup score ───
+        # ─── 5. True price range (FIX #3) ───
+        features.price_range_60s_pct = self._compute_true_range(state, now, 60)
+
+        # ─── 6. Early buildup score (uses true range) ───
         features.early_buildup_score = self._compute_buildup_score(state, features)
 
         return features
@@ -139,40 +159,52 @@ class RadarFeatureEngine:
     def _compute_return(
         self, state: SymbolRadarState, now: float, lookback_seconds: int
     ) -> float:
-        """Compute return over the given lookback period."""
+        """
+        Compute return over the given lookback period.
+
+        FIX #2: Uses the LAST sample at or before the cutoff (not the first after).
+        This gives consistent lookback horizons.
+        """
         if len(state.prices) < 2:
             return 0.0
 
         cutoff = now - lookback_seconds
         past_price = None
+
+        # Iterate and find the last sample with ts <= cutoff
         for ts, p in state.prices:
-            if ts >= cutoff:
+            if ts <= cutoff:
                 past_price = p
+            else:
+                # Past the cutoff — if we haven't found one, use the first available
+                if past_price is None:
+                    past_price = p
                 break
 
-        if past_price is None or past_price <= 0:
+        # Fallback: if all samples are after cutoff, use the oldest
+        if past_price is None:
+            past_price = state.prices[0][1]
+
+        if past_price <= 0:
             return 0.0
 
         current = state.last_price
         return ((current - past_price) / past_price) * 100.0
 
     def _compute_volume_burst(self, state: SymbolRadarState, now: float) -> float:
-        """Compare recent 10s volume against 60s baseline."""
-        if len(state.volumes) < 2:
+        """
+        Compare recent 10s volume rate against 60s baseline.
+
+        FIX #1: Uses per-update delta volumes instead of cumulative volume differences.
+        """
+        if len(state.volume_deltas) < 2:
             return 0.0
 
         recent_cutoff = now - 10
         baseline_cutoff = now - 60
 
-        recent_volumes = [v for ts, v in state.volumes if ts >= recent_cutoff]
-        baseline_volumes = [v for ts, v in state.volumes if ts >= baseline_cutoff]
-
-        if not baseline_volumes:
-            return 0.0
-
-        # Use the delta in cumulative volume as a proxy
-        recent_vol = max(recent_volumes) - min(recent_volumes) if len(recent_volumes) > 1 else 0
-        baseline_vol = max(baseline_volumes) - min(baseline_volumes) if len(baseline_volumes) > 1 else 0
+        recent_vol = sum(v for ts, v in state.volume_deltas if ts >= recent_cutoff)
+        baseline_vol = sum(v for ts, v in state.volume_deltas if ts >= baseline_cutoff)
 
         if baseline_vol <= 0:
             return 1.0 if recent_vol > 0 else 0.0
@@ -233,20 +265,44 @@ class RadarFeatureEngine:
 
         return min(recent_rate / baseline_rate, 10.0)  # cap at 10x
 
+    def _compute_true_range(
+        self, state: SymbolRadarState, now: float, lookback_seconds: int
+    ) -> float:
+        """
+        FIX #3: Compute true (high - low) / mid range over window.
+
+        Unlike abs(return), this captures actual volatility including round-trips.
+        """
+        cutoff = now - lookback_seconds
+        prices_in_window = [p for ts, p in state.prices if ts >= cutoff]
+
+        if len(prices_in_window) < 2:
+            return 0.0
+
+        high = max(prices_in_window)
+        low = min(prices_in_window)
+        mid = (high + low) / 2.0
+
+        if mid <= 0:
+            return 0.0
+
+        return ((high - low) / mid) * 100.0
+
     def _compute_buildup_score(
         self, state: SymbolRadarState, features: RadarFeatureValues
     ) -> float:
         """
         Detect early buildup: flat price + rising volume + tightening spread.
 
+        FIX #3: Uses true price range instead of net return for flatness detection.
+
         Returns 0..1 score.
         """
         score = 0.0
 
-        # Price should be in a tight range (small 60s return)
-        price_range_pct = abs(features.return_60s)
-        if price_range_pct <= self._config.buildup_price_range_max_pct:
-            score += 0.3  # Price is flat — good
+        # FIX #3: Price should be in a tight TRUE range (not just flat net return)
+        if features.price_range_60s_pct <= self._config.buildup_price_range_max_pct:
+            score += 0.3  # Price is genuinely flat — good
 
         # Volume should be increasing
         if features.volume_burst_ratio >= self._config.buildup_volume_increase_min:

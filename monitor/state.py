@@ -1,8 +1,8 @@
 """
 Per-symbol rolling state for high-resolution monitoring.
 
-Maintains ring buffers for price, spread, volume, flow, and order book
-snapshots for promoted symbols.
+Maintains ring buffers for price, spread, volume, flow, order book
+snapshots, and ask notional history for promoted symbols.
 """
 
 import time
@@ -40,6 +40,9 @@ class SymbolState:
     best_bid_qty: float = 0.0
     best_ask_qty: float = 0.0
 
+    # FIX #6 & #7: Rolling ask notional history for baseline
+    ask_notional_history: Deque = field(default_factory=lambda: deque(maxlen=120))
+
     # Tracking
     warmup_start: float = 0.0
     last_update: float = 0.0
@@ -63,6 +66,12 @@ class SymbolState:
             return False
         return (time.time() - self.warmup_start) >= 30
 
+    def is_stale(self, timeout_s: float = 10.0) -> bool:
+        """FIX #16: Check if this symbol's data is stale."""
+        if self.last_update == 0:
+            return True
+        return (time.time() - self.last_update) > timeout_s
+
     def update_bbo(self, bbo: BestBidAsk) -> None:
         now = time.time()
         if self.warmup_start == 0:
@@ -77,9 +86,14 @@ class SymbolState:
         self.last_update = now
 
     def update_book(self, update: OrderBookUpdate) -> None:
+        now = time.time()
         self.bids = update.bids
         self.asks = update.asks
-        self.last_update = time.time()
+        self.last_update = now
+
+        # FIX #6: Record ask notional snapshot for historical baseline
+        ask_top5 = sum(a.notional for a in self.asks[:5])
+        self.ask_notional_history.append((now, ask_top5))
 
     def update_trade(self, trade: AggTrade) -> None:
         now = time.time()
@@ -116,6 +130,26 @@ class SymbolState:
 
     def book_ask_notional(self, levels: int = 5) -> float:
         return sum(a.notional for a in self.asks[:levels])
+
+    def ask_notional_baseline(self, seconds: float = 60) -> float:
+        """FIX #6: Historical median of top-5 ask notional."""
+        cutoff = time.time() - seconds
+        vals = [v for ts, v in self.ask_notional_history if ts >= cutoff]
+        if len(vals) < 3:
+            return 0.0
+        return float(np.median(vals))
+
+    def ask_notional_at(self, seconds_ago: float) -> float:
+        """FIX #7: Get ask notional from N seconds ago for rehydration."""
+        target = time.time() - seconds_ago
+        closest_val = 0.0
+        closest_dist = float("inf")
+        for ts, v in self.ask_notional_history:
+            dist = abs(ts - target)
+            if dist < closest_dist:
+                closest_dist = dist
+                closest_val = v
+        return closest_val
 
 
 class StateEngine:

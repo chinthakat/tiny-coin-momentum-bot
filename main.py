@@ -100,12 +100,13 @@ class TinyCoinsSystem:
         )
 
         order_manager = OrderManager(self._config, exchange, metadata)
+        risk_engine = RiskEngine(self._config, order_manager)
         execution = ExecutionEngine(
             self._config, metadata, order_manager,
-            state_engine, deep_features, lifecycle
+            state_engine, deep_features, lifecycle,
+            risk_engine=risk_engine,
         )
         exit_manager = ExitManager(self._config, state_engine, deep_features)
-        risk_engine = RiskEngine(self._config, order_manager)
 
         long_engine = LongEngine(
             self._config, state_engine, deep_features, lifecycle
