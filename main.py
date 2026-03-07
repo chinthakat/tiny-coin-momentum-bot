@@ -32,6 +32,7 @@ from signals.long_engine import LongEngine
 from execution.engine import ExecutionEngine
 from execution.exit_manager import ExitManager
 from risk.engine import RiskEngine
+from dashboard.server import DashboardServer
 from logging_.logger import setup_logging
 
 logger = structlog.get_logger("main")
@@ -130,11 +131,27 @@ class TinyCoinsSystem:
         print(f"              {len(uni.long_eligible)} long-eligible")
         print(f"  Symbols:    {len(metadata.symbols)} total cached")
         print(f"  Clock:      offset={clock.offset_ms:.0f}ms")
-        print("=" * 60)
-        print("  Press Ctrl+C to stop\n")
+        print("  Press Ctrl+C to stop")
+        print(f"  Dashboard:  http://localhost:{self._config.dashboard_port}")
+        print("=" * 60 + "\n")
 
         # ─── 8. Start background tasks ───
         self._running = True
+
+        # Dashboard
+        dashboard = DashboardServer(port=self._config.dashboard_port)
+        dashboard.config = self._config
+        dashboard.universe = universe
+        dashboard.radar_scorer = radar_scorer
+        dashboard.radar_features = radar_features
+        dashboard.state_engine = state_engine
+        dashboard.deep_features = deep_features
+        dashboard.execution = execution
+        dashboard.risk_engine = risk_engine
+        dashboard.ws_manager = ws_manager
+        dashboard.lifecycle = lifecycle
+        dashboard.clock = clock
+        await dashboard.start()
 
         # Clock sync
         self._tasks.append(
@@ -225,6 +242,7 @@ class TinyCoinsSystem:
 
             # Shutdown WebSocket
             await ws_manager.shutdown()
+            await dashboard.stop()
             await exchange.close()
 
             # Print final stats

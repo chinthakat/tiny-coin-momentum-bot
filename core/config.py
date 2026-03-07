@@ -112,6 +112,7 @@ class AppConfig:
     api_key: str = ""
     api_secret: str = ""
     testnet: bool = False
+    dashboard_port: int = 8080
 
     # Sub-configs
     universe: UniverseConfig = field(default_factory=UniverseConfig)
@@ -165,6 +166,7 @@ def load_config(config_path: str = None, env_path: str = None) -> AppConfig:
     cfg = AppConfig(
         trade_mode=raw.get("trade_mode", "minimum_quantity"),
         dry_run=raw.get("dry_run", True),
+        dashboard_port=raw.get("dashboard_port", 8080),
         api_key=os.getenv("BINANCE_API_KEY", ""),
         api_secret=os.getenv("BINANCE_API_SECRET", ""),
         testnet=os.getenv("BINANCE_TESTNET", "false").lower() == "true",
