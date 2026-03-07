@@ -179,9 +179,12 @@ class MissedOpportunityAnalyzer:
                 "; ".join(notes),
             ])
 
-        with open(self._filepath, "a", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerows(rows)
+        try:
+            with open(self._filepath, "a", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerows(rows)
+        except PermissionError:
+            logger.error("missed_opportunity_csv_write_failed", error="Permission denied (file is likely open)", path=self._filepath)
 
         self._last_report = now
 

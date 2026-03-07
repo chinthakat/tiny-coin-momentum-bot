@@ -55,15 +55,21 @@ class MonitorConfig:
 class LongEngineConfig:
     max_spread_pct: float = 1.5
     min_top_book_notional_usdt: float = 100
-    min_warmup_seconds: int = 30
+    min_warmup_seconds: int = 10
     max_extension_pct: float = 5.0
-    score_threshold: float = 0.70
-    persistence_ticks: int = 3
+    score_threshold: float = 0.60
+    persistence_ticks: int = 2
     max_watch_duration_seconds: int = 60
     confirmation_count_required: int = 2
     max_slippage_pct: float = 0.5
     max_price_beyond_trigger_pct: float = 0.3
     max_depth_coeff_of_variation: float = 0.5  # V2: liquidity stability filter
+    # V3: Fast-ignition overrides
+    fast_ignition_warmup_seconds: int = 5
+    fast_ignition_persistence_ticks: int = 1
+    fast_ignition_confirmations: int = 1
+    fast_ignition_max_spread_pct: float = 2.5
+    fast_ignition_min_book_notional: float = 50
 
 
 @dataclass

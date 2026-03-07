@@ -25,6 +25,7 @@ class LongWatchState:
     """Tracks a symbol in long-watch."""
 
     symbol: str
+    is_ignition: bool = False      # V3: fast-ignition promotion?
     started_at: float = field(default_factory=time.time)
     price_at_start: float = 0.0
     high_since: float = 0.0
@@ -59,31 +60,62 @@ class LongEngine:
         state_engine: StateEngine,
         feature_engine: DeepFeatureEngine,
         lifecycle: LifecycleManager,
+        radar_scorer=None,  # V3: for ignition detection
     ):
         self._config = config
         self._lcfg: LongEngineConfig = config.long_engine
         self._state = state_engine
         self._features = feature_engine
         self._lifecycle = lifecycle
+        self._radar_scorer = radar_scorer  # V3
+        self._db = None                    # V3: injected externally
         self._watches: Dict[str, LongWatchState] = {}
         self._persistence: Dict[str, int] = {}  # symbol → consecutive above threshold
         self._eval_tick: int = 0  # global tick counter
 
     # ─── Hard Filters ───
 
-    def _passes_hard_filters(self, symbol: str, features: DeepFeatures) -> bool:
+    def _is_ignition_symbol(self, symbol: str) -> bool:
+        """V3: Check if symbol was promoted via fast-ignition score."""
+        if self._radar_scorer is None:
+            return False
+        result = self._radar_scorer.last_results.get(symbol)
+        if result is None:
+            return False
+        return result.fast_ignition_score >= self._config.radar.fast_ignition_threshold
+
+    def _log_funnel(self, symbol: str, event: str, details: Optional[Dict] = None) -> None:
+        """V3: Log pipeline event to DB for funnel analysis."""
+        if self._db:
+            self._db.log_signal(symbol, event, details)
+
+    def _passes_hard_filters(self, symbol: str, features: DeepFeatures, is_ignition: bool = False) -> bool:
         """Check hard prerequisites before scoring."""
         state = self._state.get(symbol)
-        if state is None or not state.is_warmed_up:
+        if state is None:
+            self._log_funnel(symbol, "rejected_no_state")
             return False
 
-        # Spread check
-        if state.spread_pct > self._lcfg.max_spread_pct:
+        # V3: Configurable warmup — shorter for ignition
+        warmup_s = self._lcfg.fast_ignition_warmup_seconds if is_ignition else self._lcfg.min_warmup_seconds
+        if not state.is_warmed_up_for(warmup_s):
+            self._log_funnel(symbol, "rejected_not_warmed_up",
+                             {"warmup_s": warmup_s, "ignition": is_ignition})
             return False
 
-        # Depth check
+        # V3: Spread check — relaxed for ignition
+        max_spread = self._lcfg.fast_ignition_max_spread_pct if is_ignition else self._lcfg.max_spread_pct
+        if state.spread_pct > max_spread:
+            self._log_funnel(symbol, "rejected_spread",
+                             {"spread": round(state.spread_pct, 3), "max": max_spread})
+            return False
+
+        # V3: Depth check — relaxed for ignition
         top_notional = state.book_bid_notional(5) + state.book_ask_notional(5)
-        if top_notional < self._lcfg.min_top_book_notional_usdt:
+        min_depth = self._lcfg.fast_ignition_min_book_notional if is_ignition else self._lcfg.min_top_book_notional_usdt
+        if top_notional < min_depth:
+            self._log_funnel(symbol, "rejected_depth",
+                             {"depth": round(top_notional, 2), "min": min_depth})
             return False
 
         # Extension check: don't enter if already too extended
@@ -91,6 +123,8 @@ class LongEngine:
         if len(recent) >= 2 and recent[0] > 0:
             extension = ((recent[-1] - recent[0]) / recent[0]) * 100
             if extension > self._lcfg.max_extension_pct:
+                self._log_funnel(symbol, "rejected_extension",
+                                 {"extension_pct": round(extension, 2)})
                 return False
 
         # V2: Liquidity stability filter — reject unstable books
@@ -102,6 +136,8 @@ class LongEngine:
                 if mean_depth > 0:
                     cv = float(np.std(depths)) / mean_depth
                     if cv > self._lcfg.max_depth_coeff_of_variation:
+                        self._log_funnel(symbol, "rejected_depth_instability",
+                                         {"cv": round(cv, 3)})
                         return False
 
         return True
@@ -178,40 +214,55 @@ class LongEngine:
     def evaluate(self, promoted_symbols: Set[str]) -> List[str]:
         """
         Evaluate all promoted symbols. Returns list of symbols ready for entry.
+
+        V3: Uses different thresholds for fast-ignition vs buildup promotions.
         """
         self._eval_tick += 1
         entry_signals: List[str] = []
 
         for symbol in promoted_symbols:
-            features = self._features.compute(symbol)
+            features = self._features.compute(symbol, require_warmup=False)
             if features is None:
                 continue
 
-            # Hard filters
-            if not self._passes_hard_filters(symbol, features):
+            # V3: Detect if this is a fast-ignition promotion
+            is_ignition = self._is_ignition_symbol(symbol)
+
+            # Hard filters (V3: uses relaxed params for ignition)
+            if not self._passes_hard_filters(symbol, features, is_ignition):
                 self._persistence[symbol] = 0
                 continue
+
+            self._log_funnel(symbol, "passed_hard_filters", {"ignition": is_ignition})
 
             # Compute score
             score = self._compute_long_score(features)
 
-            # Persistence filter
+            # Persistence filter (V3: lower threshold for ignition)
             if score >= self._lcfg.score_threshold:
                 self._persistence[symbol] = self._persistence.get(symbol, 0) + 1
             else:
                 self._persistence[symbol] = 0
-                # If in watch, check invalidation
                 if symbol in self._watches:
                     self._invalidate_watch(symbol, "score_below_threshold")
+                self._log_funnel(symbol, "rejected_score",
+                                 {"score": round(score, 3), "threshold": self._lcfg.score_threshold})
                 continue
 
-            # Need N consecutive ticks above threshold
-            if self._persistence[symbol] < self._lcfg.persistence_ticks:
+            # V3: Ignition needs fewer persistence ticks
+            required_persistence = (
+                self._lcfg.fast_ignition_persistence_ticks if is_ignition
+                else self._lcfg.persistence_ticks
+            )
+            if self._persistence[symbol] < required_persistence:
                 continue
+
+            self._log_funnel(symbol, "passed_persistence",
+                             {"ticks": self._persistence[symbol], "ignition": is_ignition})
 
             # ─── Watch management ───
             if symbol not in self._watches:
-                self._enter_watch(symbol, score, features)
+                self._enter_watch(symbol, score, features, is_ignition)
             else:
                 watch = self._watches[symbol]
                 watch.last_score = score
@@ -242,26 +293,30 @@ class LongEngine:
 
         return entry_signals
 
-    def _enter_watch(self, symbol: str, score: float, features: DeepFeatures) -> None:
+    def _enter_watch(self, symbol: str, score: float, features: DeepFeatures, is_ignition: bool = False) -> None:
         """Enter long watch state."""
         state = self._state.get(symbol)
         mid = state.mid_price if state else 0.0
 
         self._watches[symbol] = LongWatchState(
             symbol=symbol,
+            is_ignition=is_ignition,
             price_at_start=mid,
             high_since=mid,
             low_since=mid,
             last_score=score,
-            reason="high_long_score",
+            reason="fast_ignition" if is_ignition else "high_long_score",
         )
         self._lifecycle.transition(symbol, SymbolState.LONG_WATCH, "long_score_persisted")
+        self._log_funnel(symbol, "entered_watch",
+                         {"score": round(score, 3), "ignition": is_ignition})
 
         logger.info(
             "long_watch_entered",
             symbol=symbol,
             score=round(score, 3),
             price=mid,
+            ignition=is_ignition,
         )
 
     def _check_confirmation(
@@ -276,6 +331,7 @@ class LongEngine:
 
         FIX #9: Confirmations from one tick only count as one confirmation tick.
         FIX #10: Breakout checks against prior_high (before update).
+        V3: Fast-ignition uses lighter confirmation requirements.
         """
         state = self._state.get(symbol)
         if state is None:
@@ -297,20 +353,35 @@ class LongEngine:
         if features.ask_depletion > 0.3 and features.spread_stability < 0.5:
             this_tick_confirmations.add("ask_depletion_persistent")
 
+        # V3: Condition 4 (ignition only): Positive micro return
+        if watch.is_ignition and features.micro_return > 0.5:
+            this_tick_confirmations.add("micro_return_positive")
+
         # Only count as a new confirmation tick if we have new types
         if this_tick_confirmations and self._eval_tick != watch.last_confirm_tick:
             watch.confirmation_types.update(this_tick_confirmations)
             watch.confirmation_ticks += 1
             watch.last_confirm_tick = self._eval_tick
 
-        # Need enough confirmation ticks (not just enough types in one tick)
-        if watch.confirmation_ticks >= self._lcfg.confirmation_count_required:
+        # V3: Ignition requires fewer confirmation ticks
+        required = (
+            self._lcfg.fast_ignition_confirmations if watch.is_ignition
+            else self._lcfg.confirmation_count_required
+        )
+
+        if watch.confirmation_ticks >= required:
+            self._log_funnel(symbol, "confirmed", {
+                "ticks": watch.confirmation_ticks,
+                "types": list(watch.confirmation_types),
+                "ignition": watch.is_ignition,
+            })
             logger.info(
                 "long_confirmed",
                 symbol=symbol,
                 confirmation_ticks=watch.confirmation_ticks,
                 confirmation_types=list(watch.confirmation_types),
                 score=round(watch.last_score, 3),
+                ignition=watch.is_ignition,
             )
             return True
 
@@ -321,6 +392,7 @@ class LongEngine:
         self._watches.pop(symbol, None)
         self._persistence[symbol] = 0
         self._lifecycle.transition(symbol, SymbolState.COOLDOWN, reason)
+        self._log_funnel(symbol, f"watch_invalidated_{reason}")
         logger.info("long_watch_invalidated", symbol=symbol, reason=reason)
 
     def consume_entry(self, symbol: str) -> Optional[LongWatchState]:

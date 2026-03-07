@@ -65,9 +65,14 @@ class SymbolState:
 
     @property
     def is_warmed_up(self) -> bool:
+        """Default warmup check (10s)."""
+        return self.is_warmed_up_for(10)
+
+    def is_warmed_up_for(self, min_seconds: float = 10) -> bool:
+        """Check if at least min_seconds of data has been collected."""
         if self.warmup_start == 0:
             return False
-        return (time.time() - self.warmup_start) >= 30
+        return (time.time() - self.warmup_start) >= min_seconds
 
     def is_stale(self, timeout_s: float = 10.0) -> bool:
         """FIX #16: Check if this symbol's data is stale."""
@@ -90,6 +95,8 @@ class SymbolState:
 
     def update_book(self, update: OrderBookUpdate) -> None:
         now = time.time()
+        if self.warmup_start == 0:
+            self.warmup_start = now
         self.bids = update.bids
         self.asks = update.asks
         self.last_update = now

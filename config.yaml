@@ -7,6 +7,7 @@ trade_mode: "minimum_quantity"
 
 # When true, log decisions but do NOT place real orders
 dry_run: true
+dashboard_port: 8080
 
 # ─── Universe Filters ───
 universe:
@@ -31,6 +32,7 @@ radar:
     early_buildup: 0.15
   # Thresholds
   promotion_score_threshold: 0.65
+  fast_ignition_threshold: 1.45          # V3: lowered from 1.50 to catch early pumps
   buildup_price_range_max_pct: 1.0       # Flat range for buildup detection
   buildup_volume_increase_min: 1.5       # Volume ratio vs baseline
 
@@ -47,17 +49,23 @@ long_engine:
   # Hard filters
   max_spread_pct: 1.5
   min_top_book_notional_usdt: 100
-  min_warmup_seconds: 30
+  min_warmup_seconds: 10                 # V3: reduced from 30s
   max_extension_pct: 5.0                 # Don't enter if already up >5%
   # Scoring
-  score_threshold: 0.70
-  persistence_ticks: 3                   # Must exceed threshold N consecutive times
+  score_threshold: 0.60                  # V3: reduced from 0.70
+  persistence_ticks: 2                   # V3: reduced from 3
   # Watch
   max_watch_duration_seconds: 60
   confirmation_count_required: 2
   # Entry validation
   max_slippage_pct: 0.5
   max_price_beyond_trigger_pct: 0.3
+  # V3: Fast-ignition overrides (relaxed for rapid pump entries)
+  fast_ignition_warmup_seconds: 5
+  fast_ignition_persistence_ticks: 1
+  fast_ignition_confirmations: 1
+  fast_ignition_max_spread_pct: 2.5
+  fast_ignition_min_book_notional: 50
 
 # ─── Execution ───
 execution:

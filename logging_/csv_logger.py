@@ -138,9 +138,12 @@ class CsvDataLogger:
 
     def _write_header(self) -> None:
         """Write CSV header row."""
-        with open(self._filepath, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(CSV_COLUMNS)
+        try:
+            with open(self._filepath, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(CSV_COLUMNS)
+        except PermissionError:
+            logger.error("csv_header_write_failed", error="Permission denied")
 
     def set_execution(self, execution_engine) -> None:
         """Inject execution engine reference for position data."""
@@ -185,9 +188,12 @@ class CsvDataLogger:
             rows.append(row)
 
         # Append to CSV
-        with open(self._filepath, "a", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerows(rows)
+        try:
+            with open(self._filepath, "a", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerows(rows)
+        except PermissionError:
+            logger.error("csv_snapshot_write_failed", error="Permission denied (file is likely open)", path=self._filepath)
 
         self._last_write = now
         logger.info(

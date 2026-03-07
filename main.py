@@ -125,8 +125,10 @@ class TinyCoinsSystem:
         exit_manager = ExitManager(self._config, state_engine, deep_features)
 
         long_engine = LongEngine(
-            self._config, state_engine, deep_features, lifecycle
+            self._config, state_engine, deep_features, lifecycle,
+            radar_scorer=radar_scorer,
         )
+        long_engine._db = db  # V3: funnel logging
 
         # CSV data logger (1-minute snapshots)
         csv_logger = CsvDataLogger(
@@ -137,8 +139,8 @@ class TinyCoinsSystem:
         csv_logger.set_execution(execution)
         csv_logger.set_ws_manager(ws_manager)
 
-        # V2: Regime filter
-        regime_filter = RegimeFilter()
+        # V2: Regime filter (relaxed for testing)
+        regime_filter = RegimeFilter(dead_vol_threshold=0.005, dead_momentum_threshold=0.1)
         csv_logger.set_regime_filter(regime_filter)
 
         # V2: Missed-opportunity analyzer
@@ -154,12 +156,12 @@ class TinyCoinsSystem:
         radar_service._missed_opp = missed_opp
 
         # V2: History preload (seed radar baselines)
-        print("  \u23f3 Loading historical data for radar baselines...")
+        print("  [WAIT] Loading historical data for radar baselines...")
         uni_pre = universe.universe
         preloaded = await preload_radar_history(
             exchange, radar_features, uni_pre.radar_eligible, limit=360
         )
-        print(f"  \u2705 Preloaded {preloaded} symbol histories\n")
+        print(f"  [OK] Preloaded {preloaded} symbol histories\n")
 
         # ─── 6. Promotion/demotion callback ───
         async def on_promotion_change(to_promote, to_demote):
@@ -176,7 +178,7 @@ class TinyCoinsSystem:
         # ─── 7. Print startup summary ───
         uni = universe.universe
         print("\n" + "=" * 60)
-        print("  🪙  TinyCoins Momentum Trading System")
+        print("  [*] TinyCoins Momentum Trading System")
         print("=" * 60)
         print(f"  Mode:       {self._config.trade_mode}")
         print(f"  Dry Run:    {self._config.dry_run}")
@@ -240,22 +242,18 @@ class TinyCoinsSystem:
 
         # ─── 9. Main trading loop ───
         logger.info("main_loop_starting")
+        
+        # FIX: Reset websocket clock to prevent immediate stale data kill switch 
+        # from the time elapsed during history preload
+        ws_manager.reset_message_time()
 
         try:
             while self._running:
                 await asyncio.sleep(1)
 
-                # Risk checks
-                risk_engine.update_data_timestamp()
-                risk_engine.check_risk_conditions(
-                    execution.position_count,
-                    ws_manager.last_message_time,
-                )
+                # ── Observation tasks (always run) ──
 
-                if not risk_engine.is_trading_allowed:
-                    continue
-
-                # DB flush (always, regardless of regime)
+                # DB flush (every 5s)
                 self._flush_counter += 1
                 if self._flush_counter % 5 == 0:
                     flushed = db.flush()
@@ -270,8 +268,21 @@ class TinyCoinsSystem:
                 if missed_opp.should_report():
                     missed_opp.generate_report()
 
-                # V2: Regime filter — update and skip if dead
+                # V2: Regime filter — always compute
                 regime_filter.compute_regime()
+
+                # ── Trading gates ──
+
+                # Risk checks
+                risk_engine.update_data_timestamp()
+                risk_engine.check_risk_conditions(
+                    execution.position_count,
+                    ws_manager.last_message_time,
+                )
+
+                if not risk_engine.is_trading_allowed:
+                    continue
+
                 if not regime_filter.is_trading_allowed:
                     continue
 
@@ -329,6 +340,7 @@ class TinyCoinsSystem:
 
             # DB stats and close
             db_stats = db.get_run_stats()
+            funnel = db.get_funnel_stats()
             db.close()
 
             # Print final stats
@@ -344,6 +356,10 @@ class TinyCoinsSystem:
             print(f"  DB Ticks:   {db_stats['ticks']}")
             print(f"  DB Scores:  {db_stats['radar_scores']}")
             print(f"  Promotions: {db_stats['promotions']}")
+            if funnel:
+                print("  ── Signal Funnel ──")
+                for event, count in funnel.items():
+                    print(f"    {event}: {count}")
             print("=" * 60 + "\n")
 
             logger.info("system_stopped", final_stats=stats)

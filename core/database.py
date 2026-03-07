@@ -468,3 +468,13 @@ class TinyCoinsDB:
             "trades": trade_count,
             "signals": signal_count,
         }
+
+    def get_funnel_stats(self, run_id: Optional[str] = None) -> Dict:
+        """V3: Get pipeline funnel counts for diagnostics."""
+        rid = run_id or self._run_id
+        rows = self._conn.execute(
+            "SELECT event, COUNT(*) as cnt FROM signals "
+            "WHERE run_id = ? GROUP BY event ORDER BY cnt DESC",
+            (rid,),
+        ).fetchall()
+        return {r["event"]: r["cnt"] for r in rows}

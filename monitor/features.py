@@ -49,10 +49,13 @@ class DeepFeatureEngine:
         self._config = config
         self._state = state_engine
 
-    def compute(self, symbol: str) -> Optional[DeepFeatures]:
+    def compute(self, symbol: str, require_warmup: bool = True) -> Optional[DeepFeatures]:
         """Compute all deep features for a promoted symbol."""
         state = self._state.get(symbol)
-        if state is None or not state.is_warmed_up:
+        if state is None:
+            return None
+            
+        if require_warmup and not state.is_warmed_up:
             return None
 
         features = DeepFeatures(symbol=symbol, computed_at=time.time())

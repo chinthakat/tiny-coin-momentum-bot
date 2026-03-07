@@ -43,6 +43,10 @@ class WebSocketManager:
     def last_message_time(self) -> float:
         return self._last_message_time
 
+    def reset_message_time(self) -> None:
+        """Reset the last message time to prevent stale data triggers on startup."""
+        self._last_message_time = time.time()
+
     @property
     def active_symbol_count(self) -> int:
         return len(self._active_symbols)
