@@ -35,6 +35,9 @@ from risk.engine import RiskEngine
 from dashboard.server import DashboardServer
 from logging_.logger import setup_logging
 from logging_.csv_logger import CsvDataLogger
+from radar.history_preloader import preload_radar_history
+from radar.regime_filter import RegimeFilter
+from analysis.missed_opportunity import MissedOpportunityAnalyzer
 
 logger = structlog.get_logger("main")
 
@@ -120,6 +123,31 @@ class TinyCoinsSystem:
             output_dir="data", interval_seconds=60,
         )
         csv_logger.set_execution(execution)
+        csv_logger.set_ws_manager(ws_manager)
+
+        # V2: Regime filter
+        regime_filter = RegimeFilter()
+        csv_logger.set_regime_filter(regime_filter)
+
+        # V2: Missed-opportunity analyzer
+        missed_opp = MissedOpportunityAnalyzer(
+            radar_features, radar_scorer, lifecycle,
+            state_engine=state_engine,
+            output_dir="data",
+            report_interval_seconds=900,
+        )
+
+        # V2: Inject into radar service for data feeding
+        radar_service._regime_filter = regime_filter
+        radar_service._missed_opp = missed_opp
+
+        # V2: History preload (seed radar baselines)
+        print("  \u23f3 Loading historical data for radar baselines...")
+        uni_pre = universe.universe
+        preloaded = await preload_radar_history(
+            exchange, radar_features, uni_pre.radar_eligible, limit=360
+        )
+        print(f"  \u2705 Preloaded {preloaded} symbol histories\n")
 
         # ─── 6. Promotion/demotion callback ───
         async def on_promotion_change(to_promote, to_demote):
@@ -209,9 +237,18 @@ class TinyCoinsSystem:
                 if not risk_engine.is_trading_allowed:
                     continue
 
+                # V2: Regime filter — update and skip if dead
+                regime_filter.compute_regime()
+                if not regime_filter.is_trading_allowed:
+                    continue
+
                 # CSV snapshot (internally throttled to 1-minute)
                 if csv_logger.should_write():
                     csv_logger.write_snapshot()
+
+                # V2: Missed-opportunity report (every 15m)
+                if missed_opp.should_report():
+                    missed_opp.generate_report()
 
                 # Evaluate long signals
                 promoted = radar_scorer.promoted_symbols

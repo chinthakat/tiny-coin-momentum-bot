@@ -37,6 +37,7 @@ class RadarConfig:
     cooldown_seconds: int = 300
     weights: RadarWeights = field(default_factory=RadarWeights)
     promotion_score_threshold: float = 0.65
+    fast_ignition_threshold: float = 1.5      # V2: fast-ignition promotion threshold
     buildup_price_range_max_pct: float = 1.0
     buildup_volume_increase_min: float = 1.5
 
@@ -62,6 +63,7 @@ class LongEngineConfig:
     confirmation_count_required: int = 2
     max_slippage_pct: float = 0.5
     max_price_beyond_trigger_pct: float = 0.3
+    max_depth_coeff_of_variation: float = 0.5  # V2: liquidity stability filter
 
 
 @dataclass

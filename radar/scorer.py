@@ -26,9 +26,15 @@ class RadarResult:
 
     symbol: str
     composite_score: float = 0.0
+    fast_ignition_score: float = 0.0  # V2: abrupt pump score
     label: RadarLabel = RadarLabel.NORMAL
     features: Optional[RadarFeatureValues] = None
     scored_at: float = 0.0
+
+    @property
+    def effective_score(self) -> float:
+        """Highest of composite and fast-ignition scores."""
+        return max(self.composite_score, self.fast_ignition_score)
 
 
 @dataclass
@@ -187,19 +193,25 @@ class RadarScorer:
                 continue
 
             score = self._compute_composite_score(features)
+            fast_score = features.fast_ignition_score  # V2: already computed
             label = self._classify_label(features, score)
+
+            # V2: If fast-ignition is strong, override label
+            if fast_score > self._config.fast_ignition_threshold and label == RadarLabel.NORMAL:
+                label = RadarLabel.IGNITION_RISK
 
             result = RadarResult(
                 symbol=symbol,
                 composite_score=score,
+                fast_ignition_score=fast_score,
                 label=label,
                 features=features,
                 scored_at=time.time(),
             )
             results.append(result)
 
-        # Sort by score descending
-        results.sort(key=lambda r: r.composite_score, reverse=True)
+        # Sort by effective score (max of composite, fast) descending
+        results.sort(key=lambda r: r.effective_score, reverse=True)
 
         # Cache results
         self._last_results = {r.symbol: r for r in results}
@@ -225,7 +237,10 @@ class RadarScorer:
         # Filter candidates
         candidates: List[RadarResult] = []
         for r in results:
-            if r.composite_score < self._config.promotion_score_threshold:
+            # V2: Promote if EITHER score exceeds threshold
+            passes_composite = r.composite_score >= self._config.promotion_score_threshold
+            passes_fast = r.fast_ignition_score >= self._config.fast_ignition_threshold
+            if not (passes_composite or passes_fast):
                 continue
             if r.symbol not in long_eligible:
                 continue

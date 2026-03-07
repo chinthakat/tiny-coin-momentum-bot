@@ -40,8 +40,11 @@ class SymbolState:
     best_bid_qty: float = 0.0
     best_ask_qty: float = 0.0
 
-    # FIX #6 & #7: Rolling ask notional history for baseline
-    ask_notional_history: Deque = field(default_factory=lambda: deque(maxlen=120))
+    # FIX #6 & #7: Rolling ask notional history for baseline (V2: extended to 300s)
+    ask_notional_history: Deque = field(default_factory=lambda: deque(maxlen=600))
+
+    # V2: Bid depth history for liquidity stability filter
+    bid_depth_history: Deque = field(default_factory=lambda: deque(maxlen=60))
 
     # Tracking
     warmup_start: float = 0.0
@@ -94,6 +97,10 @@ class SymbolState:
         # FIX #6: Record ask notional snapshot for historical baseline
         ask_top5 = sum(a.notional for a in self.asks[:5])
         self.ask_notional_history.append((now, ask_top5))
+
+        # V2: Record bid depth for liquidity stability filter
+        bid_top5 = sum(b.notional for b in self.bids[:5])
+        self.bid_depth_history.append((now, bid_top5))
 
     def update_trade(self, trade: AggTrade) -> None:
         now = time.time()

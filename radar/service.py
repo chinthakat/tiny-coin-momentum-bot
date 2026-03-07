@@ -41,6 +41,10 @@ class RadarService:
         self._scorer = scorer
         self._running = False
         self._tick_count: int = 0
+        self._regime_filter = None  # V2: injected externally
+        self._missed_opp = None    # V2: injected externally
+        self._positive_returns: int = 0  # V2: market momentum tracker
+        self._total_updates: int = 0
 
     @property
     def is_running(self) -> bool:
@@ -86,6 +90,22 @@ class RadarService:
 
                 self._features.update(symbol, close_price, quote_volume, spread_pct)
 
+                # V2: Feed BTC data to regime filter
+                if symbol == "BTCUSDT" and self._regime_filter:
+                    self._regime_filter.update_btc(close_price, quote_volume)
+
+                # V2: Feed price to missed-opportunity tracker
+                if self._missed_opp:
+                    self._missed_opp.update_price(symbol, close_price)
+
+                # V2: Track positive returns for momentum
+                state = self._features.get_or_create_state(symbol)
+                if len(state.prices) >= 2:
+                    prev = state.prices[-2][1] if len(state.prices) >= 2 else close_price
+                    if prev > 0 and close_price > prev:
+                        self._positive_returns += 1
+                self._total_updates += 1
+
             except (ValueError, TypeError):
                 continue
 
@@ -124,6 +144,14 @@ class RadarService:
                 # Periodic cleanup
                 if self._tick_count % 60 == 0:
                     self._features.cleanup_stale(eligible)
+
+                # V2: Update market momentum for regime filter
+                if self._regime_filter and self._total_updates > 0:
+                    self._regime_filter.update_market_momentum(
+                        self._total_updates, self._positive_returns
+                    )
+                    self._positive_returns = 0
+                    self._total_updates = 0
 
                 # Log top scores periodically
                 if self._tick_count % 10 == 0 and results:

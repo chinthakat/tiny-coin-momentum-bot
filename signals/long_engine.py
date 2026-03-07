@@ -93,6 +93,17 @@ class LongEngine:
             if extension > self._lcfg.max_extension_pct:
                 return False
 
+        # V2: Liquidity stability filter — reject unstable books
+        if len(state.bid_depth_history) >= 5:
+            import numpy as np
+            depths = [v for ts, v in state.bid_depth_history if ts >= time.time() - 10]
+            if len(depths) >= 3:
+                mean_depth = float(np.mean(depths))
+                if mean_depth > 0:
+                    cv = float(np.std(depths)) / mean_depth
+                    if cv > self._lcfg.max_depth_coeff_of_variation:
+                        return False
+
         return True
 
     # ─── Composite Score ───

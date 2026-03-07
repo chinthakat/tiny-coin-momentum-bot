@@ -30,6 +30,7 @@ class RadarFeatureValues:
     return_30s: float = 0.0
     return_60s: float = 0.0
     return_acceleration: float = 0.0    # change in velocity
+    fast_ignition_score: float = 0.0    # V2: abrupt pump detection
     volume_burst_ratio: float = 0.0     # recent vs baseline
     spread_compression: float = 0.0     # negative = compressed
     quote_activity_ratio: float = 0.0   # update freq vs baseline
@@ -153,6 +154,9 @@ class RadarFeatureEngine:
 
         # ─── 6. Early buildup score (uses true range) ───
         features.early_buildup_score = self._compute_buildup_score(state, features)
+
+        # ─── 7. Fast-ignition score (V2) ───
+        features.fast_ignition_score = self._compute_fast_ignition(features)
 
         return features
 
@@ -317,6 +321,33 @@ class RadarFeatureEngine:
             score += 0.15  # More updates than normal
 
         return min(score, 1.0)
+
+    def _compute_fast_ignition(self, features: RadarFeatureValues) -> float:
+        """
+        V2: Fast-ignition score for catching abrupt pump starts.
+
+        Weighted heavily toward short-term velocity and volume burst.
+        Spread penalty prevents triggering on illiquid spikes.
+        """
+        score = 0.0
+
+        # Strong short-term return (up to 2x weight)
+        score += max(features.return_10s, 0) * 2.0
+
+        # Acceleration (up to 1.8x)
+        score += max(features.return_acceleration, 0) * 1.8
+
+        # Volume burst (up to 1.5x)
+        vol_contrib = min(features.volume_burst_ratio, 10.0)
+        score += vol_contrib * 0.15
+
+        # Spread penalty: wider spread = more penalty
+        if features.spread_compression > 10:
+            score -= 1.0
+        elif features.spread_compression > 5:
+            score -= 0.5
+
+        return max(score, 0.0)
 
     def cleanup_stale(self, active_symbols: set) -> None:
         """Remove state for symbols no longer in the universe."""

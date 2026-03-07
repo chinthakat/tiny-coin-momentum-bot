@@ -147,3 +147,11 @@ class ExchangeClient:
         if symbol:
             kwargs["symbol"] = symbol
         return await self._retry(self.client.get_open_orders, **kwargs)
+
+    async def get_klines(
+        self, symbol: str, interval: str = "1m", limit: int = 360
+    ) -> List[List]:
+        """Fetch historical kline/candlestick data."""
+        return await self._retry(
+            self.client.get_klines, symbol=symbol, interval=interval, limit=limit
+        )

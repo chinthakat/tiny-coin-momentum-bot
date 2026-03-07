@@ -49,6 +49,7 @@ CSV_COLUMNS = [
     "price_range_60s_pct",
     # ─── Radar scores ───
     "radar_composite_score",
+    "fast_ignition_score",
     "radar_label",
     "is_promoted",
     # ─── Deep features (only for promoted symbols) ───
@@ -74,6 +75,10 @@ CSV_COLUMNS = [
     "total_volume_60s",
     # ─── Lifecycle ───
     "lifecycle_state",
+    # ─── V2: Debug fields ───
+    "deep_stream_attached",
+    "deep_data_age_ms",
+    "market_regime",
     # ─── Position info (if in position) ───
     "has_position",
     "position_entry_price",
@@ -108,6 +113,8 @@ class CsvDataLogger:
         self._lifecycle = lifecycle
         self._interval = interval_seconds
         self._execution = None  # set externally
+        self._regime_filter = None  # set externally
+        self._ws_manager = None  # set externally
         self._last_write: float = 0.0
 
         # Create output directory
@@ -138,6 +145,14 @@ class CsvDataLogger:
     def set_execution(self, execution_engine) -> None:
         """Inject execution engine reference for position data."""
         self._execution = execution_engine
+
+    def set_regime_filter(self, regime_filter) -> None:
+        """Inject regime filter for market regime field."""
+        self._regime_filter = regime_filter
+
+    def set_ws_manager(self, ws_manager) -> None:
+        """Inject WS manager for deep stream status."""
+        self._ws_manager = ws_manager
 
     def should_write(self) -> bool:
         """Check if enough time has passed since last write."""
@@ -255,6 +270,18 @@ class CsvDataLogger:
             lc_entry = self._lifecycle.get(symbol)
             lc_state = lc_entry.state.value if lc_entry else ""
 
+        # ─── V2: Debug fields ───
+        deep_attached = 0
+        deep_age_ms = 0.0
+        if self._ws_manager and is_promoted:
+            deep_attached = 1 if symbol in self._ws_manager._active_symbols else 0
+        if state and is_promoted and state.last_update > 0:
+            deep_age_ms = round((now - state.last_update) * 1000, 0)
+
+        regime = ""
+        if self._regime_filter:
+            regime = self._regime_filter.regime.value
+
         # ─── Position ───
         has_pos = symbol in positions
         pos_entry = pos_qty = pos_pnl = pos_hold = 0.0
@@ -290,6 +317,7 @@ class CsvDataLogger:
             round(price_range, 4),
             # Radar scores
             round(result.composite_score, 4),
+            round(result.fast_ignition_score, 4),
             result.label.value,
             1 if is_promoted else 0,
             # Deep features
@@ -315,6 +343,10 @@ class CsvDataLogger:
             round(vol60, 4),
             # Lifecycle
             lc_state,
+            # V2: Debug
+            deep_attached,
+            deep_age_ms,
+            regime,
             # Position
             1 if has_pos else 0,
             round(pos_entry, 8),
