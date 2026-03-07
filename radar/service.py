@@ -43,6 +43,7 @@ class RadarService:
         self._tick_count: int = 0
         self._regime_filter = None  # V2: injected externally
         self._missed_opp = None    # V2: injected externally
+        self._db = None            # V2: injected externally
         self._positive_returns: int = 0  # V2: market momentum tracker
         self._total_updates: int = 0
 
@@ -90,6 +91,10 @@ class RadarService:
 
                 self._features.update(symbol, close_price, quote_volume, spread_pct)
 
+                # DB: Buffer tick for promoted symbols only
+                if self._db and symbol in (self._scorer.promoted_symbols or set()):
+                    self._db.buffer_tick(symbol, close_price, quote_volume, spread_pct)
+
                 # V2: Feed BTC data to regime filter
                 if symbol == "BTCUSDT" and self._regime_filter:
                     self._regime_filter.update_btc(close_price, quote_volume)
@@ -136,6 +141,19 @@ class RadarService:
                 to_promote, to_demote = self._scorer.select_promotions(
                     results, long_eligible
                 )
+
+                # DB: Buffer radar scores for scored symbols
+                if self._db:
+                    for r in results[:20]:  # top 20 only
+                        f = r.features
+                        if f:
+                            self._db.buffer_radar_score(
+                                r.symbol, r.composite_score, r.fast_ignition_score,
+                                r.label.value,
+                                f.return_10s, f.return_30s, f.return_60s,
+                                f.volume_burst_ratio, f.spread_compression,
+                                f.early_buildup_score, f.price_range_60s_pct,
+                            )
 
                 # Notify callback if there are changes
                 if (to_promote or to_demote) and on_promotion_change:

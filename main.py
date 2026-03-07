@@ -38,6 +38,7 @@ from logging_.csv_logger import CsvDataLogger
 from radar.history_preloader import preload_radar_history
 from radar.regime_filter import RegimeFilter
 from analysis.missed_opportunity import MissedOpportunityAnalyzer
+from core.database import TinyCoinsDB
 
 logger = structlog.get_logger("main")
 
@@ -51,6 +52,7 @@ class TinyCoinsSystem:
         self._config = None
         self._running = False
         self._tasks = []
+        self._flush_counter = 0
 
     async def start(self) -> None:
         """Initialize and start all system components."""
@@ -72,7 +74,15 @@ class TinyCoinsSystem:
             print("   See: https://www.binance.com/en/my/settings/api-management\n")
             return
 
-        # ─── 2. Initialize exchange client ───
+        # ─── 2. Initialize database ───
+        db = TinyCoinsDB(db_path="data/tinycoins.db")
+        db.connect()
+        run_id = db.start_new_run(self._config.trade_mode, self._config.dry_run)
+        archived = db.archive_old_runs(keep_last=3)
+        if archived:
+            logger.info("old_runs_cleaned", count=archived)
+
+        # ─── 3. Initialize exchange client ───
         exchange = ExchangeClient(self._config)
         await exchange.connect()
 
@@ -93,6 +103,7 @@ class TinyCoinsSystem:
         radar_service = RadarService(
             self._config, universe, radar_features, radar_scorer
         )
+        radar_service._db = db  # V2: DB reference for tick/score storage
 
         state_engine = StateEngine(self._config.monitor)
         deep_features = DeepFeatureEngine(self._config.monitor, state_engine)
@@ -110,6 +121,7 @@ class TinyCoinsSystem:
             state_engine, deep_features, lifecycle,
             risk_engine=risk_engine,
         )
+        execution._db = db  # V2: DB reference for trade logging
         exit_manager = ExitManager(self._config, state_engine, deep_features)
 
         long_engine = LongEngine(
@@ -153,8 +165,13 @@ class TinyCoinsSystem:
         async def on_promotion_change(to_promote, to_demote):
             for symbol in to_demote:
                 await stream_manager.unsubscribe(symbol)
+                db.log_promotion(symbol, "demote")
             for symbol in to_promote:
                 await stream_manager.subscribe(symbol)
+                result = radar_scorer.last_results.get(symbol)
+                score = result.effective_score if result else 0
+                label = result.label.value if result else ""
+                db.log_promotion(symbol, "promote", score, label)
 
         # ─── 7. Print startup summary ───
         uni = universe.universe
@@ -169,6 +186,7 @@ class TinyCoinsSystem:
         print(f"              {len(uni.long_eligible)} long-eligible")
         print(f"  Symbols:    {len(metadata.symbols)} total cached")
         print(f"  Clock:      offset={clock.offset_ms:.0f}ms")
+        print(f"  Run ID:     {run_id}")
         print("  Press Ctrl+C to stop")
         print(f"  Dashboard:  http://localhost:{self._config.dashboard_port}")
         print("=" * 60 + "\n")
@@ -237,10 +255,12 @@ class TinyCoinsSystem:
                 if not risk_engine.is_trading_allowed:
                     continue
 
-                # V2: Regime filter — update and skip if dead
-                regime_filter.compute_regime()
-                if not regime_filter.is_trading_allowed:
-                    continue
+                # DB flush (always, regardless of regime)
+                self._flush_counter += 1
+                if self._flush_counter % 5 == 0:
+                    flushed = db.flush()
+                    if flushed > 0:
+                        logger.debug("db_flushed", rows=flushed)
 
                 # CSV snapshot (internally throttled to 1-minute)
                 if csv_logger.should_write():
@@ -249,6 +269,11 @@ class TinyCoinsSystem:
                 # V2: Missed-opportunity report (every 15m)
                 if missed_opp.should_report():
                     missed_opp.generate_report()
+
+                # V2: Regime filter — update and skip if dead
+                regime_filter.compute_regime()
+                if not regime_filter.is_trading_allowed:
+                    continue
 
                 # Evaluate long signals
                 promoted = radar_scorer.promoted_symbols
@@ -273,6 +298,9 @@ class TinyCoinsSystem:
                             qty=position.quantity,
                             entry=position.entry_price,
                         )
+                        db.log_trade_entry(
+                            symbol, "BUY", position.entry_price, position.quantity
+                        )
 
         except asyncio.CancelledError:
             pass
@@ -281,6 +309,9 @@ class TinyCoinsSystem:
             logger.info("system_shutting_down")
             self._running = False
             radar_service.stop()
+
+            # Final DB flush
+            db.flush()
 
             # Close any open positions
             for symbol in list(execution.positions.keys()):
@@ -296,15 +327,23 @@ class TinyCoinsSystem:
             await dashboard.stop()
             await exchange.close()
 
+            # DB stats and close
+            db_stats = db.get_run_stats()
+            db.close()
+
             # Print final stats
             stats = risk_engine.get_status_summary()
             print("\n" + "=" * 60)
-            print("  📊 Session Summary")
+            print("  \U0001f4ca Session Summary")
             print("=" * 60)
+            print(f"  Run ID:     {run_id}")
             print(f"  Trades:     {stats['daily']['trades']}")
             print(f"  Win Rate:   {stats['daily']['win_rate']}%")
             print(f"  PnL:        {stats['daily']['pnl']}")
             print(f"  Drawdown:   {stats['daily']['drawdown_pct']}%")
+            print(f"  DB Ticks:   {db_stats['ticks']}")
+            print(f"  DB Scores:  {db_stats['radar_scores']}")
+            print(f"  Promotions: {db_stats['promotions']}")
             print("=" * 60 + "\n")
 
             logger.info("system_stopped", final_stats=stats)
