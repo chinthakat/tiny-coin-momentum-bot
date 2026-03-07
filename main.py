@@ -34,6 +34,7 @@ from execution.exit_manager import ExitManager
 from risk.engine import RiskEngine
 from dashboard.server import DashboardServer
 from logging_.logger import setup_logging
+from logging_.csv_logger import CsvDataLogger
 
 logger = structlog.get_logger("main")
 
@@ -111,6 +112,14 @@ class TinyCoinsSystem:
         long_engine = LongEngine(
             self._config, state_engine, deep_features, lifecycle
         )
+
+        # CSV data logger (1-minute snapshots)
+        csv_logger = CsvDataLogger(
+            self._config, radar_features, radar_scorer,
+            state_engine, deep_features, lifecycle,
+            output_dir="data", interval_seconds=60,
+        )
+        csv_logger.set_execution(execution)
 
         # ─── 6. Promotion/demotion callback ───
         async def on_promotion_change(to_promote, to_demote):
@@ -199,6 +208,10 @@ class TinyCoinsSystem:
 
                 if not risk_engine.is_trading_allowed:
                     continue
+
+                # CSV snapshot (internally throttled to 1-minute)
+                if csv_logger.should_write():
+                    csv_logger.write_snapshot()
 
                 # Evaluate long signals
                 promoted = radar_scorer.promoted_symbols
