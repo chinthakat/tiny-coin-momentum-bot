@@ -131,7 +131,7 @@ class CsvDataLogger:
 
     def _write_header(self) -> None:
         """Write CSV header row."""
-        with open(self._filepath, "w", newline="") as f:
+        with open(self._filepath, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(CSV_COLUMNS)
 
@@ -170,7 +170,7 @@ class CsvDataLogger:
             rows.append(row)
 
         # Append to CSV
-        with open(self._filepath, "a", newline="") as f:
+        with open(self._filepath, "a", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerows(rows)
 
