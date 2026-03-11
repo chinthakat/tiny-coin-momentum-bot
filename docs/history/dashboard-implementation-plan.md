@@ -20,9 +20,9 @@ Add a premium web dashboard to the trading system. Embedded aiohttp web server s
 
 ### Web Dashboard Module
 
-#### [NEW] [dashboard/\_\_init\_\_.py](file:///c:/Projects/Trading/TinyCoins/dashboard/__init__.py)
+#### [NEW] [dashboard/\_\_init\_\_.py](../../dashboard/__init__.py)
 
-#### [NEW] [dashboard/server.py](file:///c:/Projects/Trading/TinyCoins/dashboard/server.py)
+#### [NEW] [dashboard/server.py](../../dashboard/server.py)
 aiohttp web server running on port 8080:
 - `GET /` — serves `index.html`
 - `GET /api/status` — system status, connection health, config
@@ -31,7 +31,7 @@ aiohttp web server running on port 8080:
 - `GET /api/trades` — closed trade history
 - `GET /api/coin/{symbol}` — detailed deep features for a specific symbol
 
-#### [NEW] [dashboard/static/index.html](file:///c:/Projects/Trading/TinyCoins/dashboard/static/index.html)
+#### [NEW] [dashboard/static/index.html](../../dashboard/static/index.html)
 Single-page dashboard with:
 - Dark premium design with glassmorphism, gradients, and micro-animations
 - Two tab layout (Dashboard / Orders & Trades)
@@ -39,11 +39,11 @@ Single-page dashboard with:
 - Click-to-expand coin details
 - Responsive layout
 
-#### [MODIFY] [main.py](file:///c:/Projects/Trading/TinyCoins/main.py)
+#### [MODIFY] [main.py](../../main.py)
 - Import and start the dashboard server as an additional background task
 - Pass all component references to the dashboard so it can query live state
 
-#### [MODIFY] [config.py](file:///c:/Projects/Trading/TinyCoins/core/config.py)
+#### [MODIFY] [config.py](../../core/config.py)
 - Add `DashboardConfig` dataclass with `port`, `host`, `enabled` fields
 
 ## Verification

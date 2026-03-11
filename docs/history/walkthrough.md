@@ -38,12 +38,12 @@ Premium dark-themed dashboard with auto-refresh every 5 seconds at `http://local
 ### Dashboard Tab
 Shows connection status, universe stats, and all shortlisted coins with radar scores, labels, returns, volume burst, and buildup metrics. Click any coin for deep microstructure details.
 
-![Dashboard Tab](file:///C:/Users/chint/.gemini/antigravity/brain/d58ad8c3-8c29-45c4-a12e-9ec85cbb3d2e/tinycoins_dashboard_tab_1772849348882.png)
+_(Screenshot was captured on the original development machine and is not part of this repository.)_
 
 ### Orders & Trades Tab
 Shows daily PnL, win rate, drawdown, risk status, active positions with unrealized PnL, and completed trade history.
 
-![Orders Tab](file:///C:/Users/chint/.gemini/antigravity/brain/d58ad8c3-8c29-45c4-a12e-9ec85cbb3d2e/tinycoins_orders_tab_1772849375829.png)
+_(Screenshot was captured on the original development machine and is not part of this repository.)_
 
 ---
 
@@ -58,7 +58,6 @@ When `trade_mode: "minimum_quantity"`:
 ## How to Run
 
 ```powershell
-cd c:\Projects\Trading\TinyCoins
 python main.py
 # Dashboard opens at http://localhost:8080
 ```
