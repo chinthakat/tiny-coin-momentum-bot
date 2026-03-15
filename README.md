@@ -24,6 +24,10 @@ software.** Read this before running anything:
   tuned for producing signals, not for making money.
 - The market regime filter thresholds are hard-coded in `main.py`, not read
   from `config.yaml`.
+- Nine keys in `config.yaml` are parsed but never read by any code, four of them
+  execution and risk-safety settings. They are listed in
+  [Configuration](#keys-in-configyaml-that-nothing-reads) so nobody mistakes
+  them for working controls.
 
 ## How it works
 
@@ -60,9 +64,13 @@ many, inspect few, trade fewer*.
    exchange minimum quantity or a risk-budgeted size), validates the order
    against cached symbol filters, places it through `exchange/order_manager.py`,
    and then runs hard stop, trailing stop, time stop and flow-invalidation exits.
-6. **Risk** (`risk/engine.py`) — portfolio caps plus kill switches for daily
-   drawdown, consecutive losses, stale market data and repeated order rejects.
-   When a kill switch trips, the main loop stops opening positions.
+6. **Risk** (`risk/engine.py`) — kill switches for daily drawdown, consecutive
+   losses, stale market data and repeated order rejects. When a kill switch
+   trips, the main loop stops opening positions. Of the notional caps in the
+   code, only `max_total_notional` is actually reachable, and only through the
+   `execution/engine.py` entry path; see
+   [Configuration](#keys-in-configyaml-that-nothing-reads) for what is and is
+   not wired.
 7. **Observation** — a SQLite layer (`core/database.py`), a 1-minute CSV snapshot
    of every shortlisted coin (`logging_/csv_logger.py`), a 15-minute
    missed-opportunity report (`analysis/missed_opportunity.py`), and an aiohttp
@@ -91,8 +99,12 @@ graph TD
 
 ## Requirements
 
-- Python 3.9 or newer (nothing in the code uses newer syntax; developed on
-  Windows)
+- Python 3.10 or newer. The floor is real, not nominal: `core/events.py` and
+  `monitor/features.py` use `@dataclass(slots=True)`, and the `slots` parameter
+  only exists from 3.10. `main.py` imports both modules at startup, so on 3.9
+  `python main.py` fails immediately with
+  `TypeError: dataclass() got an unexpected keyword argument 'slots'`.
+  Developed on Windows.
 - A Binance account with API keys, if you want anything beyond dry-run. Read-only
   keys are enough for dry-run.
 
@@ -156,10 +168,8 @@ These are the only three variables the code reads (`core/config.py`). Copy
 | `radar.fast_ignition_threshold` | `1.45` | Separate threshold for abrupt-pump promotion. |
 | `radar.buildup_price_range_max_pct` | `1.0` | Flat-range width that counts as build-up. |
 | `radar.buildup_volume_increase_min` | `1.5` | Volume ratio versus baseline for build-up. |
-| `monitor.max_promoted_symbols` | `15` | Hard cap on high-resolution subscriptions. |
 | `monitor.book_depth_levels` | `20` | Depth levels requested per promoted symbol. |
 | `monitor.book_update_speed_ms` | `100` | Depth stream update speed. |
-| `monitor.rolling_window_seconds` | `60` | Rolling feature window. |
 | `monitor.flow_window_seconds` | `5` | Trade-flow window. |
 | `long_engine.max_spread_pct` | `1.5` | Hard spread filter at entry. |
 | `long_engine.min_top_book_notional_usdt` | `100` | Minimum top-of-book notional. |
@@ -169,20 +179,14 @@ These are the only three variables the code reads (`core/config.py`). Copy
 | `long_engine.persistence_ticks` | `2` | Consecutive ticks above threshold before watching. |
 | `long_engine.max_watch_duration_seconds` | `60` | How long a watch stays alive. |
 | `long_engine.confirmation_count_required` | `2` | Confirmations needed to fire an entry. |
-| `long_engine.max_slippage_pct` | `0.5` | Slippage tolerance at entry validation. |
-| `long_engine.max_price_beyond_trigger_pct` | `0.3` | How far past the trigger price an entry may still happen. |
 | `long_engine.fast_ignition_*` | see file | Relaxed warmup, persistence, confirmations, spread and book-notional gates for fast-ignition promotions. |
 | `execution.order_type` | `LIMIT` | `LIMIT` or `MARKET`. |
-| `execution.fill_timeout_seconds` | `5` | Cancel an unfilled limit order after this long. |
-| `execution.max_book_consumption_pct` | `10` | Never take more than this share of visible depth. |
 | `exit.hard_stop_pct` | `2.0` | Stop loss. |
 | `exit.time_stop_seconds` | `300` | Maximum hold time. |
 | `exit.trailing_stop_activation_pct` | `1.0` | Gain at which the trailing stop arms. |
 | `exit.trailing_stop_distance_pct` | `0.5` | Trailing distance. |
 | `exit.flow_invalidation_exit` | `true` | Exit immediately when the flow thesis breaks. |
-| `risk.max_risk_per_trade_pct` | `1.0` | Risk budget per trade, percent of capital. |
 | `risk.max_concurrent_positions` | `3` | Position count cap. |
-| `risk.max_total_exposure_pct` | `10.0` | Portfolio exposure cap. |
 | `risk.max_daily_drawdown_pct` | `3.0` | Kill switch on daily loss. |
 | `risk.max_consecutive_losses` | `5` | Kill switch on losing streak. |
 | `risk.stale_data_timeout_seconds` | `30` | Kill switch when market data stops arriving. |
@@ -191,16 +195,50 @@ These are the only three variables the code reads (`core/config.py`). Copy
 | `logging.log_dir` | `logs` | Where rotating log files are written. |
 | `logging.level` | `INFO` | Log level. |
 | `logging.rotation_mb` | `50` | Log rotation size. |
-| `logging.retention_days` | `30` | Log retention. |
 | `logging.structured_json` | `true` | JSON log output via structlog. |
 
-Some dataclass fields in `core/config.py` have no matching key in the shipped
-`config.yaml` and therefore always take their defaults:
-`execution.risk_per_trade_usd` (5.0), `execution.max_notional_per_trade` (50.0),
-`execution.max_slippage_pct` (0.3), `risk.max_total_notional` (200.0),
-`risk.max_symbol_notional` (50.0), and
-`long_engine.max_depth_coeff_of_variation` (0.5). Add them to `config.yaml` if
-you want to change them.
+### Keys in `config.yaml` that nothing reads
+
+The shipped `config.yaml` also contains the keys below. They are parsed into
+`core/config.py` dataclasses, and that is all that happens to them — no module
+in the repository ever reads the resulting field, so editing them changes
+nothing. `core/config.py:176` holds the only `yaml.safe_load` in the tree, so
+there is no second read path. **Four of these look like execution and
+risk-safety knobs and are not.** They are documented here rather than removed
+because they are still present in the file you will open.
+
+| Key | What it looks like it does | What actually happens |
+| --- | --- | --- |
+| `monitor.max_promoted_symbols` | Caps high-resolution subscriptions | `monitor/stream_manager.py::subscribe()` applies no cap. The only limit on promotions is `radar.promotion_top_n` in `radar/scorer.py`. |
+| `monitor.rolling_window_seconds` | Rolling feature window length | Window sizes are hard-coded `deque(maxlen=...)` values in `monitor/state.py`. |
+| `long_engine.max_slippage_pct` | Entry slippage tolerance | Unread. The one slippage cap, `execution/engine.py:232`, reads `execution.max_slippage_pct`, which has no `config.yaml` key and so is always its `0.3` default. |
+| `long_engine.max_price_beyond_trigger_pct` | Ceiling on entering past the trigger price | Unread; no such check exists. |
+| `execution.fill_timeout_seconds` | Cancels an unfilled limit order | No timeout is implemented. `exchange/order_manager.py` has a `cancel_order()` that nothing schedules. |
+| `execution.max_book_consumption_pct` | Caps the share of visible depth taken | Unread. A depth cap does exist, but it is a hard-coded 5% of the top-5 ask book in `execution/engine.py:146`, and it only runs in `normal` trade mode — not the default `minimum_quantity` mode. |
+| `risk.max_risk_per_trade_pct` | Per-trade risk budget | Unread. Sizing uses `execution.risk_per_trade_usd` (`execution/engine.py:133`), an absolute dollar figure with no `config.yaml` key. |
+| `risk.max_total_exposure_pct` | Portfolio exposure cap | Unread. The only working portfolio cap is `risk.max_total_notional` — see below. |
+| `logging.retention_days` | Log retention | Unread. `logging_/logger.py` uses hard-coded `backupCount` values (5, 10, 5). |
+
+### Fields with no `config.yaml` key
+
+These `core/config.py` fields **are** read by the code but have no key in the
+shipped `config.yaml`, so they always take their defaults. Add them to
+`config.yaml` if you want to change them.
+
+| Field | Default | Where it is read |
+| --- | --- | --- |
+| `execution.risk_per_trade_usd` | `5.0` | `execution/engine.py:133`, position sizing in `normal` trade mode. |
+| `execution.max_notional_per_trade` | `50.0` | `execution/engine.py:150`, also `normal` trade mode only. |
+| `execution.max_slippage_pct` | `0.3` | `execution/engine.py:232`, the entry price buffer cap. |
+| `risk.max_total_notional` | `200.0` | `risk/engine.py:142`. The only portfolio cap that actually fires, and only via the `execution/engine.py` entry path. |
+| `risk.max_symbol_notional` | `50.0` | `risk/engine.py:152` — but see the note below; it can never trigger. |
+| `long_engine.max_depth_coeff_of_variation` | `0.5` | `signals/long_engine.py:138`, the liquidity stability filter. |
+
+`risk/engine.py::can_open_position()` takes a `symbol_notional` argument and
+only applies `max_symbol_notional` when that argument is greater than zero.
+Neither caller passes it: `execution/engine.py:180` supplies the position count
+and total notional only, and `main.py:298` supplies the position count only.
+The per-symbol cap is therefore dead code in the current wiring.
 
 ## Usage
 
